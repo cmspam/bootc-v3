@@ -1,0 +1,181 @@
+name: Build and Publish bootc
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+jobs:
+  get-version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.get_tag.outputs.tag }}
+      needs_build: ${{ steps.check.outputs.needs_build }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Get latest AUR bootc version
+        id: get_tag
+        run: |
+          FULL_VER=$(curl -s "https://aur.archlinux.org/rpc/?v=5&type=info&arg=bootc" \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['results'][0]['Version'])")
+          echo "Latest bootc version: $FULL_VER"
+          echo "tag=$FULL_VER" >> "$GITHUB_OUTPUT"
+
+      - name: Check if already built
+        id: check
+        run: |
+          LATEST="${{ steps.get_tag.outputs.tag }}"
+          LAST="$(cat last_built_version.txt 2>/dev/null || echo '')"
+          echo "Last built: '$LAST' | Latest: '$LATEST'"
+          if [[ "$LAST" == "$LATEST" ]]; then
+            echo "Already up to date, skipping build."
+            echo "needs_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "New version detected, will build."
+            echo "needs_build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: get-version
+    if: needs.get-version.outputs.needs_build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: v3
+            docker_image: cachyos/cachyos-v3
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Build package
+        run: |
+          mkdir -p build
+          docker run --rm \
+            --privileged \
+            -v "$PWD/build:/pkg" \
+            "${{ matrix.docker_image }}" \
+            bash -c "
+              set -e
+              echo '=== Initializing keyring ==='
+              pacman-key --init
+              pacman-key --populate archlinux cachyos
+
+              echo '=== Updating system ==='
+              pacman -Syu --noconfirm
+
+              echo '=== Installing build dependencies ==='
+              pacman -S --noconfirm --needed base-devel git rust cargo ostree
+
+              echo '=== Setting up build user ==='
+              useradd -m builder
+              echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
+
+              echo '=== Cloning bootc AUR ==='
+              git clone --depth 1 https://aur.archlinux.org/bootc.git /tmp/bootc
+              chown -R builder:builder /tmp/bootc
+
+              echo '=== Extracting sources ==='
+              su builder -c 'cd /tmp/bootc && makepkg --noconfirm --skippgpcheck --nobuild -s' || true
+
+              echo '=== Initialising git in source dirs ==='
+              for d in /tmp/bootc/src/*/; do
+                if [ -d \"\$d\" ] && [ ! -d \"\$d/.git\" ]; then
+                  su builder -c \"cd '\$d' && git init && git add -A && git commit -m init\" 2>/dev/null || true
+                fi
+              done
+
+              echo '=== Building ==='
+              chown -R builder:builder /tmp/bootc
+              su builder -c 'cd /tmp/bootc && makepkg --noconfirm --skippgpcheck -e'
+
+              echo '=== Copying package ==='
+              cp /tmp/bootc/*.pkg.tar.zst /pkg/
+            "
+
+      - name: Generate pacman database
+        run: |
+          REPO_NAME="bootc-v3"
+          mkdir -p /tmp/repo
+          cp build/*.pkg.tar.zst /tmp/repo/
+
+          docker run --rm \
+            -v /tmp/repo:/repo \
+            "${{ matrix.docker_image }}" \
+            bash -c "
+              pacman -Sy --noconfirm --needed pacman 2>&1 | tail -3
+              cd /repo
+              repo-add ${REPO_NAME}.db.tar.gz *.pkg.tar.zst
+              ln -sf ${REPO_NAME}.db.tar.gz ${REPO_NAME}.db
+              ln -sf ${REPO_NAME}.files.tar.gz ${REPO_NAME}.files
+            "
+
+      - name: Create versioned release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ needs.get-version.outputs.tag }}"
+          VERSIONED_TAG="${TAG}-${{ matrix.target }}"
+
+          gh release delete "$VERSIONED_TAG" --yes 2>/dev/null || true
+          git push origin ":refs/tags/$VERSIONED_TAG" 2>/dev/null || true
+
+          gh release create "$VERSIONED_TAG" \
+            --title "bootc ${TAG} (${{ matrix.target }})" \
+            --notes "bootc \`${TAG}\` built for x86-64-v3." \
+            build/*.pkg.tar.zst
+
+      - name: Update latest release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ needs.get-version.outputs.tag }}"
+          LATEST_TAG="latest-${{ matrix.target }}"
+          REPO_NAME="bootc-v3"
+
+          gh release delete "$LATEST_TAG" --yes 2>/dev/null || true
+          git push origin ":refs/tags/$LATEST_TAG" 2>/dev/null || true
+
+          gh release create "$LATEST_TAG" \
+            --title "bootc latest (${{ matrix.target }}) — ${TAG}" \
+            --notes "## pacman.conf
+\`\`\`ini
+[${REPO_NAME}]
+SigLevel = Optional
+Server = https://github.com/cmspam/bootc-v3/releases/download/${LATEST_TAG}
+\`\`\`" \
+            build/*.pkg.tar.zst \
+            /tmp/repo/${REPO_NAME}.db.tar.gz \
+            /tmp/repo/${REPO_NAME}.db \
+            /tmp/repo/${REPO_NAME}.files.tar.gz \
+            /tmp/repo/${REPO_NAME}.files
+
+  record-version:
+    needs: [get-version, build]
+    if: needs.get-version.outputs.needs_build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          TAG="${{ needs.get-version.outputs.tag }}"
+          echo "$TAG" > last_built_version.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add last_built_version.txt
+          git commit -m "chore: record built version $TAG [skip ci]"
+          git push
