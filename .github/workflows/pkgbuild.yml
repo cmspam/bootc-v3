@@ -135,7 +135,7 @@ jobs:
 
           gh release create "$VERSIONED_TAG" \
             --title "bootc ${TAG} (${{ matrix.target }})" \
-            --notes "bootc \`${TAG}\` built for x86-64-v3." \
+            --notes "bootc ${TAG} built for x86-64-v3." \
             build/*.pkg.tar.zst
 
       - name: Update latest release
@@ -149,14 +149,11 @@ jobs:
           gh release delete "$LATEST_TAG" --yes 2>/dev/null || true
           git push origin ":refs/tags/$LATEST_TAG" 2>/dev/null || true
 
+          NOTES=$(printf '[%s]\nSigLevel = Optional\nServer = https://github.com/cmspam/bootc-v3/releases/download/%s' "$REPO_NAME" "$LATEST_TAG")
+
           gh release create "$LATEST_TAG" \
-            --title "bootc latest (${{ matrix.target }}) — ${TAG}" \
-            --notes "## pacman.conf
-\`\`\`ini
-[${REPO_NAME}]
-SigLevel = Optional
-Server = https://github.com/cmspam/bootc-v3/releases/download/${LATEST_TAG}
-\`\`\`" \
+            --title "bootc latest (${{ matrix.target }}) - ${TAG}" \
+            --notes "$NOTES" \
             build/*.pkg.tar.zst \
             /tmp/repo/${REPO_NAME}.db.tar.gz \
             /tmp/repo/${REPO_NAME}.db \
