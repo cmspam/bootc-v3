@@ -104,10 +104,7 @@ jobs:
               # EPYC) emits AMD-only SSE4a instructions (INSERTQ/EXTRQ) that
               # SIGILL on Intel CPUs. Pin to the v3 microarch baseline so the
               # binary runs on every CPU that can run cachyos-v3.
-              cat > /etc/makepkg.conf.d/rust.conf <<'RUST'
-              RUSTFLAGS=\"-C opt-level=3 -C target-cpu=x86-64-v3\"
-              DEBUG_RUSTFLAGS=\"-C debuginfo=2\"
-              RUST
+              printf 'RUSTFLAGS=\"-C opt-level=3 -C target-cpu=x86-64-v3\"\nDEBUG_RUSTFLAGS=\"-C debuginfo=2\"\n' > /etc/makepkg.conf.d/rust.conf
               sed -i 's/-march=native/-march=x86-64-v3 -mtune=generic/' /etc/makepkg.conf
               echo '--- effective flags ---'
               grep -E 'CFLAGS=|RUSTFLAGS=' /etc/makepkg.conf /etc/makepkg.conf.d/rust.conf
