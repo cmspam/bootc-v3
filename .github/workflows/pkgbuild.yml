@@ -98,6 +98,20 @@ jobs:
                 fi
               done
 
+              echo '=== Override -march=native to x86-64-v3 ==='
+              # cachyos-v3 default makepkg.conf sets CFLAGS=-march=native and
+              # RUSTFLAGS=-C target-cpu=native. Building on GHA runners (AMD
+              # EPYC) emits AMD-only SSE4a instructions (INSERTQ/EXTRQ) that
+              # SIGILL on Intel CPUs. Pin to the v3 microarch baseline so the
+              # binary runs on every CPU that can run cachyos-v3.
+              cat > /etc/makepkg.conf.d/rust.conf <<'RUST'
+              RUSTFLAGS=\"-C opt-level=3 -C target-cpu=x86-64-v3\"
+              DEBUG_RUSTFLAGS=\"-C debuginfo=2\"
+              RUST
+              sed -i 's/-march=native/-march=x86-64-v3 -mtune=generic/' /etc/makepkg.conf
+              echo '--- effective flags ---'
+              grep -E 'CFLAGS=|RUSTFLAGS=' /etc/makepkg.conf /etc/makepkg.conf.d/rust.conf
+
               echo '=== Building ==='
               chown -R builder:builder /tmp/bootc
               su builder -c 'cd /tmp/bootc && makepkg --noconfirm --skippgpcheck -e'
