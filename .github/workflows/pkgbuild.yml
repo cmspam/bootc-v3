@@ -1,4 +1,4 @@
-name: Build and Publish bootc
+name: Build and Publish bootc + bootupd
 
 on:
   schedule:
@@ -14,20 +14,34 @@ jobs:
   get-version:
     runs-on: ubuntu-latest
     outputs:
-      tag: ${{ steps.get_tag.outputs.tag }}
+      bootc_ver:   ${{ steps.get_tag.outputs.bootc_ver }}
+      bootupd_ver: ${{ steps.get_tag.outputs.bootupd_ver }}
+      tag:         ${{ steps.get_tag.outputs.tag }}
       needs_build: ${{ steps.check.outputs.needs_build }}
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Get latest AUR bootc version
+      - name: Get latest AUR versions for bootc + bootupd
         id: get_tag
         run: |
-          FULL_VER=$(curl -s "https://aur.archlinux.org/rpc/?v=5&type=info&arg=bootc" \
-            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['results'][0]['Version'])")
-          echo "Latest bootc version: $FULL_VER"
-          echo "tag=$FULL_VER" >> "$GITHUB_OUTPUT"
+          fetch() {
+            curl -s "https://aur.archlinux.org/rpc/?v=5&type=info&arg=$1" \
+              | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['results'][0]['Version'])"
+          }
+          BOOTC_VER=$(fetch bootc)
+          BOOTUPD_VER=$(fetch bootupd)
+          # Combined tag: <bootc>_<bootupd>
+          TAG="${BOOTC_VER}_${BOOTUPD_VER}"
+          echo "Latest bootc:   $BOOTC_VER"
+          echo "Latest bootupd: $BOOTUPD_VER"
+          echo "Combined tag:   $TAG"
+          {
+            echo "bootc_ver=$BOOTC_VER"
+            echo "bootupd_ver=$BOOTUPD_VER"
+            echo "tag=$TAG"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Check if already built
         id: check
@@ -61,7 +75,7 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Build package
+      - name: Build bootc + bootupd packages
         run: |
           mkdir -p build
           docker run --rm \
@@ -84,40 +98,46 @@ jobs:
               useradd -m builder
               echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
 
-              echo '=== Cloning bootc AUR ==='
-              git clone --depth 1 https://aur.archlinux.org/bootc.git /tmp/bootc
-              chown -R builder:builder /tmp/bootc
-
-              echo '=== Extracting sources ==='
-              su builder -c 'cd /tmp/bootc && makepkg --noconfirm --skippgpcheck --nobuild -s' || true
-
-              echo '=== Initialising git in source dirs ==='
-              for d in /tmp/bootc/src/*/; do
-                if [ -d \"\$d\" ] && [ ! -d \"\$d/.git\" ]; then
-                  su builder -c \"cd '\$d' && git init && git add -A && git commit -m init\" 2>/dev/null || true
-                fi
-              done
-
               echo '=== Override -march=native to x86-64-v3 ==='
-              # cachyos-v3 default makepkg.conf sets CFLAGS=-march=native and
-              # RUSTFLAGS=-C target-cpu=native. Building on GHA runners (AMD
-              # EPYC) emits AMD-only SSE4a instructions (INSERTQ/EXTRQ) that
-              # SIGILL on Intel CPUs. Pin to the v3 microarch baseline so the
-              # binary runs on every CPU that can run cachyos-v3.
-              printf 'RUSTFLAGS=\"-C opt-level=3 -C target-cpu=x86-64-v3\"\nDEBUG_RUSTFLAGS=\"-C debuginfo=2\"\n' > /etc/makepkg.conf.d/rust.conf
+              # cachyos-v3 default makepkg.conf uses -march=native and
+              # -C target-cpu=native. GHA runners are AMD EPYC so that
+              # emits AMD-only SSE4a instructions (INSERTQ/EXTRQ) which
+              # SIGILL on Intel CPUs. Pin to v3 baseline.
+              printf 'RUSTFLAGS=\"-C opt-level=3 -C target-cpu=x86-64-v3\"\nDEBUG_RUSTFLAGS=\"-C debuginfo=2\"\n' \
+                  > /etc/makepkg.conf.d/rust.conf
               sed -i 's/-march=native/-march=x86-64-v3 -mtune=generic/' /etc/makepkg.conf
               echo '--- effective flags ---'
               grep -E 'CFLAGS=|RUSTFLAGS=' /etc/makepkg.conf /etc/makepkg.conf.d/rust.conf
 
-              echo '=== Building ==='
-              chown -R builder:builder /tmp/bootc
-              su builder -c 'cd /tmp/bootc && makepkg --noconfirm --skippgpcheck -e'
+              # Generic build-one-AUR-package helper
+              build_aur() {
+                  local pkg=\$1
+                  echo \"=== Cloning AUR/\$pkg ===\"
+                  rm -rf /tmp/\$pkg
+                  git clone --depth 1 https://aur.archlinux.org/\$pkg.git /tmp/\$pkg
+                  chown -R builder:builder /tmp/\$pkg
+                  echo \"=== Extracting sources for \$pkg ===\"
+                  su builder -c \"cd /tmp/\$pkg && makepkg --noconfirm --skippgpcheck --nobuild -s\" || true
+                  echo \"=== Initialising git in source dirs (\$pkg) ===\"
+                  for d in /tmp/\$pkg/src/*/; do
+                    if [ -d \"\$d\" ] && [ ! -d \"\$d/.git\" ]; then
+                      su builder -c \"cd '\$d' && git init && git add -A && git commit -m init\" 2>/dev/null || true
+                    fi
+                  done
+                  echo \"=== Building \$pkg ===\"
+                  chown -R builder:builder /tmp/\$pkg
+                  su builder -c \"cd /tmp/\$pkg && makepkg --noconfirm --skippgpcheck -e\"
+                  cp /tmp/\$pkg/*.pkg.tar.zst /pkg/
+              }
 
-              echo '=== Copying package ==='
-              cp /tmp/bootc/*.pkg.tar.zst /pkg/
+              build_aur bootc
+              build_aur bootupd
+
+              echo '=== Built packages ==='
+              ls -la /pkg/
             "
 
-      - name: Generate pacman database
+      - name: Generate pacman database (covers bootc + bootupd)
         run: |
           REPO_NAME="bootc-v3"
           mkdir -p /tmp/repo
@@ -145,8 +165,8 @@ jobs:
           git push origin ":refs/tags/$VERSIONED_TAG" 2>/dev/null || true
 
           gh release create "$VERSIONED_TAG" \
-            --title "bootc ${TAG} (${{ matrix.target }})" \
-            --notes "bootc ${TAG} built for x86-64-v3." \
+            --title "bootc ${{ needs.get-version.outputs.bootc_ver }} + bootupd ${{ needs.get-version.outputs.bootupd_ver }} (${{ matrix.target }})" \
+            --notes "bootc + bootupd built for x86-64-v3." \
             build/*.pkg.tar.zst
 
       - name: Update latest release
@@ -163,7 +183,7 @@ jobs:
           NOTES=$(printf '[%s]\nSigLevel = Optional\nServer = https://github.com/cmspam/bootc-v3/releases/download/%s' "$REPO_NAME" "$LATEST_TAG")
 
           gh release create "$LATEST_TAG" \
-            --title "bootc latest (${{ matrix.target }}) - ${TAG}" \
+            --title "bootc + bootupd latest (${{ matrix.target }}) - ${TAG}" \
             --notes "$NOTES" \
             build/*.pkg.tar.zst \
             /tmp/repo/${REPO_NAME}.db.tar.gz \
