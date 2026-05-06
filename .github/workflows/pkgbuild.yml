@@ -111,14 +111,14 @@ jobs:
               printf 'RUSTFLAGS=\"-C opt-level=3 -C target-cpu=x86-64-v3 --remap-path-prefix=/tmp=/build --remap-path-prefix=/home/builder=/build\"\nDEBUG_RUSTFLAGS=\"-C debuginfo=2\"\nCARGO_BUILD_RUSTFLAGS=\"\$RUSTFLAGS\"\n' \
                   > /etc/makepkg.conf.d/rust.conf
               sed -i 's/-march=native/-march=x86-64-v3 -mtune=generic/' /etc/makepkg.conf
-              cat >> /etc/makepkg.conf <<'MKCONF'
-
-# Reproducibility additions
-CFLAGS=\"\$CFLAGS -ffile-prefix-map=/tmp=/build -ffile-prefix-map=/home/builder=/build\"
-CXXFLAGS=\"\$CXXFLAGS -ffile-prefix-map=/tmp=/build -ffile-prefix-map=/home/builder=/build\"
-LDFLAGS=\"\$LDFLAGS -Wl,--build-id=sha1\"
-PACKAGER=\"cmspam <cmspam@localhost>\"
-MKCONF
+              printf '%s\n' \
+                  '' \
+                  '# Reproducibility additions' \
+                  'CFLAGS=\"\$CFLAGS -ffile-prefix-map=/tmp=/build -ffile-prefix-map=/home/builder=/build\"' \
+                  'CXXFLAGS=\"\$CXXFLAGS -ffile-prefix-map=/tmp=/build -ffile-prefix-map=/home/builder=/build\"' \
+                  'LDFLAGS=\"\$LDFLAGS -Wl,--build-id=sha1\"' \
+                  'PACKAGER=\"cmspam <cmspam@localhost>\"' \
+                  >> /etc/makepkg.conf
               echo '--- effective flags ---'
               grep -E 'CFLAGS=|RUSTFLAGS=|PACKAGER=|LDFLAGS=' /etc/makepkg.conf /etc/makepkg.conf.d/rust.conf
 
