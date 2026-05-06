@@ -98,16 +98,29 @@ jobs:
               useradd -m builder
               echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
 
-              echo '=== Override -march=native to x86-64-v3 ==='
+              echo '=== Override -march=native to x86-64-v3 + reproducibility flags ==='
               # cachyos-v3 default makepkg.conf uses -march=native and
               # -C target-cpu=native. GHA runners are AMD EPYC so that
               # emits AMD-only SSE4a instructions (INSERTQ/EXTRQ) which
               # SIGILL on Intel CPUs. Pin to v3 baseline.
-              printf 'RUSTFLAGS=\"-C opt-level=3 -C target-cpu=x86-64-v3\"\nDEBUG_RUSTFLAGS=\"-C debuginfo=2\"\n' \
+              # Reproducibility:
+              # - -ffile-prefix-map normalizes build paths embedded in binaries
+              # - --remap-path-prefix does the same for rustc
+              # - --build-id=sha1 makes the linker build-ID deterministic
+              # - PACKAGER pins the makepkg metadata
+              printf 'RUSTFLAGS=\"-C opt-level=3 -C target-cpu=x86-64-v3 --remap-path-prefix=/tmp=/build --remap-path-prefix=/home/builder=/build\"\nDEBUG_RUSTFLAGS=\"-C debuginfo=2\"\nCARGO_BUILD_RUSTFLAGS=\"\$RUSTFLAGS\"\n' \
                   > /etc/makepkg.conf.d/rust.conf
               sed -i 's/-march=native/-march=x86-64-v3 -mtune=generic/' /etc/makepkg.conf
+              cat >> /etc/makepkg.conf <<'MKCONF'
+
+# Reproducibility additions
+CFLAGS=\"\$CFLAGS -ffile-prefix-map=/tmp=/build -ffile-prefix-map=/home/builder=/build\"
+CXXFLAGS=\"\$CXXFLAGS -ffile-prefix-map=/tmp=/build -ffile-prefix-map=/home/builder=/build\"
+LDFLAGS=\"\$LDFLAGS -Wl,--build-id=sha1\"
+PACKAGER=\"cmspam <cmspam@localhost>\"
+MKCONF
               echo '--- effective flags ---'
-              grep -E 'CFLAGS=|RUSTFLAGS=' /etc/makepkg.conf /etc/makepkg.conf.d/rust.conf
+              grep -E 'CFLAGS=|RUSTFLAGS=|PACKAGER=|LDFLAGS=' /etc/makepkg.conf /etc/makepkg.conf.d/rust.conf
 
               # Generic build-one-AUR-package helper
               build_aur() {
@@ -115,9 +128,24 @@ jobs:
                   echo \"=== Cloning AUR/\$pkg ===\"
                   rm -rf /tmp/\$pkg
                   git clone --depth 1 https://aur.archlinux.org/\$pkg.git /tmp/\$pkg
+                  # Derive SOURCE_DATE_EPOCH from the AUR PKGBUILD's commit
+                  # timestamp. Same upstream PKGBUILD → same SDE → reproducible
+                  # output (modulo toolchain changes, which we accept since
+                  # the daily-rebuild's whole point is to track current Arch
+                  # sonames). git log on a --depth 1 clone has only the
+                  # latest commit but its timestamp is what we want.
+                  local pkg_sde=\$(cd /tmp/\$pkg && git log -1 --format=%ct)
+                  export SOURCE_DATE_EPOCH=\$pkg_sde
+                  export KBUILD_BUILD_TIMESTAMP=\"@\$pkg_sde\"
+                  export KBUILD_BUILD_USER=cmspam
+                  export KBUILD_BUILD_HOST=cmspam-build
+                  echo \"  AUR/\$pkg PKGBUILD timestamp: \$pkg_sde (\$(date -u -d @\$pkg_sde))\"
                   chown -R builder:builder /tmp/\$pkg
+                  # su without -m resets env, so re-export inside each
+                  # builder shell. -E doesn't apply to su (only sudo).
+                  local env_setup=\"export SOURCE_DATE_EPOCH=\$pkg_sde KBUILD_BUILD_TIMESTAMP=@\$pkg_sde KBUILD_BUILD_USER=cmspam KBUILD_BUILD_HOST=cmspam-build\"
                   echo \"=== Extracting sources for \$pkg ===\"
-                  su builder -c \"cd /tmp/\$pkg && makepkg --noconfirm --skippgpcheck --nobuild -s\" || true
+                  su builder -c \"\$env_setup; cd /tmp/\$pkg && makepkg --noconfirm --skippgpcheck --nobuild -s\" || true
                   echo \"=== Initialising git in source dirs (\$pkg) ===\"
                   for d in /tmp/\$pkg/src/*/; do
                     if [ -d \"\$d\" ] && [ ! -d \"\$d/.git\" ]; then
@@ -126,7 +154,7 @@ jobs:
                   done
                   echo \"=== Building \$pkg ===\"
                   chown -R builder:builder /tmp/\$pkg
-                  su builder -c \"cd /tmp/\$pkg && makepkg --noconfirm --skippgpcheck -e\"
+                  su builder -c \"\$env_setup; cd /tmp/\$pkg && makepkg --noconfirm --skippgpcheck -e\"
                   cp /tmp/\$pkg/*.pkg.tar.zst /pkg/
               }
 
