@@ -47,15 +47,26 @@ jobs:
       - name: Check if already built
         id: check
         run: |
-          # Force daily rebuild against current Arch state. Pre-built
-          # binaries on rolling Arch get stale as upstream library
-          # sonames bump (libalpm, openssl, glibc, …). Rebuilding
-          # daily keeps everything linked against current libs even
-          # when AUR pkgver hasn't changed.
+          # Build only when the AUR source moved: the combined
+          # bootc_bootupd version tag. bootc/bootupd are built straight
+          # from their AUR PKGBUILDs (no local patch), so the tag is the
+          # whole source fingerprint. A floating cachyos-v3 toolchain
+          # (gcc/glibc bump) alone is NOT a reason to rebuild — it would
+          # only change the bytes, forcing cache22 consumers to redownload
+          # a functionally identical layer. Manual dispatch forces a build.
           LATEST="${{ steps.get_tag.outputs.tag }}"
           LAST="$(cat last_built_version.txt 2>/dev/null || echo '')"
-          echo "Last built: '$LAST' | Latest: '$LATEST' (forced rebuild)"
-          echo "needs_build=true" >> "$GITHUB_OUTPUT"
+          echo "Last built: '$LAST' | Latest: '$LATEST'"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Manual dispatch — forcing build."
+            echo "needs_build=true" >> "$GITHUB_OUTPUT"
+          elif [ "$LATEST" = "$LAST" ]; then
+            echo "Up to date — skipping build."
+            echo "needs_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "AUR source changed — building."
+            echo "needs_build=true" >> "$GITHUB_OUTPUT"
+          fi
 
   build:
     needs: get-version
