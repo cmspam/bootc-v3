@@ -27,9 +27,29 @@ jobs:
       - name: Get latest AUR versions for bootc + bootupd
         id: get_tag
         run: |
+          # The AUR RPC intermittently answers with an empty body or an error
+          # page. Handing that straight to json.load kills the run, so retry
+          # and only accept a response we could actually read a version out of.
           fetch() {
-            curl -s "https://aur.archlinux.org/rpc/?v=5&type=info&arg=$1" \
-              | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['results'][0]['Version'])"
+            local attempt body ver
+            for attempt in 1 2 3 4 5; do
+              body=$(curl -fsS --max-time 30 \
+                "https://aur.archlinux.org/rpc/?v=5&type=info&arg=$1") || body=""
+              ver=$(printf '%s' "$body" | python3 -c "
+          import sys, json
+          try:
+              print(json.load(sys.stdin)['results'][0]['Version'])
+          except Exception:
+              pass
+          " 2>/dev/null)
+              if [ -n "$ver" ]; then
+                printf '%s\n' "$ver"
+                return 0
+              fi
+              echo "AUR RPC gave no version for $1 (attempt $attempt)" >&2
+              [ "$attempt" = "5" ] && return 1
+              sleep 15
+            done
           }
           BOOTC_VER=$(fetch bootc)
           BOOTUPD_VER=$(fetch bootupd)
