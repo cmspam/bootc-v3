@@ -123,7 +123,7 @@ jobs:
               pacman -Syu --noconfirm
 
               echo '=== Installing build dependencies ==='
-              pacman -S --noconfirm --needed base-devel git rust cargo ostree
+              pacman -S --noconfirm --needed base-devel git rust cargo ostree clang pcre2
 
               echo '=== Setting up build user ==='
               useradd -m builder
@@ -139,7 +139,7 @@ jobs:
               # - --remap-path-prefix does the same for rustc
               # - --build-id=sha1 makes the linker build-ID deterministic
               # - PACKAGER pins the makepkg metadata
-              printf 'RUSTFLAGS=\"-C opt-level=3 -C target-cpu=x86-64-v3 --remap-path-prefix=/tmp=/build --remap-path-prefix=/home/builder=/build\"\nDEBUG_RUSTFLAGS=\"-C debuginfo=2\"\nCARGO_BUILD_RUSTFLAGS=\"\$RUSTFLAGS\"\n' \
+              printf 'RUSTFLAGS=\"-C opt-level=3 -C target-cpu=x86-64-v3 --remap-path-prefix=/tmp=/build --remap-path-prefix=/home/builder=/build -C link-arg=-lpcre2-8\"\nDEBUG_RUSTFLAGS=\"-C debuginfo=2\"\nCARGO_BUILD_RUSTFLAGS=\"\$RUSTFLAGS\"\n' \
                   > /etc/makepkg.conf.d/rust.conf
               sed -i 's/-march=native/-march=x86-64-v3 -mtune=generic/' /etc/makepkg.conf
               printf '%s\n' \
@@ -152,6 +152,44 @@ jobs:
                   >> /etc/makepkg.conf
               echo '--- effective flags ---'
               grep -E 'CFLAGS=|RUSTFLAGS=|PACKAGER=|LDFLAGS=' /etc/makepkg.conf /etc/makepkg.conf.d/rust.conf
+
+              echo '=== Building libselinux (build-time only) ==='
+              # bootc 1.16.11 added the selinux crate. Its -sys crate needs
+              # libselinux headers and library at build time and offers
+              # no way to opt out, but Arch ships no libselinux package.
+              # Build it from the upstream release and link it statically
+              # so the packaged bootc keeps no runtime dependency on a
+              # library cache22 does not install.
+              SEL_VER=3.11
+              SEL_PREFIX=/opt/selinux
+              mkdir -p /tmp/selinux-src && cd /tmp/selinux-src
+              for lib in libsepol libselinux; do
+                curl -sSLO \"https://github.com/SELinuxProject/selinux/releases/download/\$SEL_VER/\$lib-\$SEL_VER.tar.gz\"
+                tar xf \"\$lib-\$SEL_VER.tar.gz\"
+              done
+              sel_make=\"PREFIX=\$SEL_PREFIX LIBDIR=\$SEL_PREFIX/lib SHLIBDIR=\$SEL_PREFIX/lib INCLUDEDIR=\$SEL_PREFIX/include DISABLE_SHARED=y\"
+              export CFLAGS='-O2 -fPIC'
+              make -C libsepol-\$SEL_VER/include \$sel_make install
+              make -C libsepol-\$SEL_VER/src -j\$(nproc) \$sel_make install
+              # libselinux picks up the pcre2 flags in its top-level
+              # makefile, so build from there with the bindings left out.
+              export CFLAGS=\"-O2 -fPIC -I\$SEL_PREFIX/include\"
+              export LDFLAGS=\"-L\$SEL_PREFIX/lib\"
+              make -C libselinux-\$SEL_VER -j\$(nproc) SUBDIRS='include src' \\
+                  DISABLE_RPM=y USE_PCRE2=y \$sel_make install
+              unset CFLAGS LDFLAGS
+              # selinux-sys emits -lselinux and nothing else, so fold
+              # libsepol into that archive instead of relying on the
+              # order rustc passes extra link arguments in.
+              printf '%s\n' \\
+                  \"create \$SEL_PREFIX/lib/libselinux-merged.a\" \\
+                  \"addlib \$SEL_PREFIX/lib/libselinux.a\" \\
+                  \"addlib \$SEL_PREFIX/lib/libsepol.a\" \\
+                  save end | ar -M
+              mv \$SEL_PREFIX/lib/libselinux-merged.a \$SEL_PREFIX/lib/libselinux.a
+              # Leave no shared library behind for selinux-sys to find.
+              rm -f \$SEL_PREFIX/lib/*.so*
+              cd /
 
               # Generic build-one-AUR-package helper
               build_aur() {
@@ -174,7 +212,7 @@ jobs:
                   chown -R builder:builder /tmp/\$pkg
                   # su without -m resets env, so re-export inside each
                   # builder shell. -E doesn't apply to su (only sudo).
-                  local env_setup=\"export SOURCE_DATE_EPOCH=\$pkg_sde KBUILD_BUILD_TIMESTAMP=@\$pkg_sde KBUILD_BUILD_USER=cmspam KBUILD_BUILD_HOST=cmspam-build\"
+                  local env_setup=\"export SOURCE_DATE_EPOCH=\$pkg_sde KBUILD_BUILD_TIMESTAMP=@\$pkg_sde KBUILD_BUILD_USER=cmspam KBUILD_BUILD_HOST=cmspam-build SELINUX_PATH=\$SEL_PREFIX SELINUX_STATIC=1\"
                   echo \"=== Extracting sources for \$pkg ===\"
                   su builder -c \"\$env_setup; cd /tmp/\$pkg && makepkg --noconfirm --skippgpcheck --nobuild -s\" || true
                   echo \"=== Initialising git in source dirs (\$pkg) ===\"
