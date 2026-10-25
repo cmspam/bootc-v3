@@ -123,7 +123,11 @@ jobs:
               pacman -Syu --noconfirm
 
               echo '=== Installing build dependencies ==='
-              pacman -S --noconfirm --needed base-devel git rust cargo ostree clang pcre2
+              # rust ships cargo. Naming cargo as well asks pacman to pick a
+              # provider for it, and --noconfirm takes the first one listed.
+              # When cachyos-extra-v3 carries rustup, that is rustup, which
+              # evicts rust and leaves no toolchain configured.
+              pacman -S --noconfirm --needed base-devel git rust ostree clang pcre2
 
               echo '=== Setting up build user ==='
               useradd -m builder
