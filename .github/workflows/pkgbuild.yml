@@ -128,13 +128,15 @@ jobs:
               # When cachyos-extra-v3 carries rustup, that is rustup, which
               # evicts rust and leaves no toolchain configured.
               #
-              # skopeo: the AUR PKGBUILD's check() runs the full cargo test
+              # skopeo: the AUR PKGBUILD check() runs the full cargo test
               # suite. bootc 1.17.x added crates/lib/src/delta_ostree.rs,
-              # whose tests export a container image through `skopeo copy`.
-              # Without the binary the tests abort with "skopeo spawn error:
-              # No such file or directory". Upstream bootc installs the same
-              # binary set (its Cargo.toml lists them under
-              # [workspace.metadata.binary-dependencies]).
+              # whose tests export a container image through skopeo copy.
+              # Without the binary the tests abort with a skopeo spawn
+              # error. Upstream bootc installs the same binary set; its
+              # Cargo.toml lists them under workspace metadata binary
+              # dependencies.
+              # NOTE: this whole block is inside a double quoted bash -c
+              # string, so it must not contain quotes, backticks or $.
               pacman -S --noconfirm --needed base-devel git rust ostree clang pcre2 skopeo
 
               echo '=== Setting up build user ==='
